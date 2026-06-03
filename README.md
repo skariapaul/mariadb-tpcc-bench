@@ -2,13 +2,13 @@
 
 Interactive MariaDB TPC-C / TPC-H benchmark runner using HammerDB and Docker.
 
-Tests MariaDB performance across multiple CPU core counts with a fully tuned InnoDB configuration, then produces a Markdown comparison report.
+Tests MariaDB performance across multiple CPU core counts with a fully tuned InnoDB configuration, then produces a Markdown comparison report. Supports NUMA-aware CPU pinning for accurate multi-socket results.
 
 ---
 
 ## Requirements
 
-- Docker Engine 20.10+ with Compose v2 (`docker compose`)
+- Docker Engine 20.10+ with Compose v2 (`docker compose`) or Compose v1 (`docker-compose`)
 - bash 4+
 - `curl` or `wget`
 - ~20 GB free disk, ≥ 4 GB RAM
@@ -41,6 +41,9 @@ Results and a Markdown report are written to `./mariadb-bench-YYYYMMDD/results/`
 | `--skip-tpch` | — | Skip TPC-H analytics benchmark |
 | `--buffer-pool SIZE` | 75% RAM | InnoDB buffer pool (e.g. `12G`) |
 | `--mariadb-ver VER` | 10.11 | MariaDB Docker image tag |
+| `--numa-node N` | — | Pin container to NUMA node N; auto-derives cpuset per core count |
+| `--cpuset RANGE` | — | Pin container to explicit CPUs (e.g. `"0-7"` or `"0,2,4,6"`) |
+| `--list-numa` | — | Show NUMA topology and exit |
 | `--force` | — | Re-run configs that already have results |
 | `--dry-run` | — | Print plan without running anything |
 
@@ -56,9 +59,38 @@ bash mariadb-tpcc-bench.sh --warehouses 256 --rampup 5 --duration 30 --yes
 # Test MariaDB 11.4 with a custom buffer pool
 bash mariadb-tpcc-bench.sh --mariadb-ver 11.4 --buffer-pool 24G --yes
 
+# NUMA-aware run — pin to node 0, cpuset auto-derived per core count
+bash mariadb-tpcc-bench.sh --cores "8 16 32" --numa-node 0 --yes
+
+# Pin to specific cores explicitly
+bash mariadb-tpcc-bench.sh --cores "8 16" --cpuset "0-15" --yes
+
+# Inspect NUMA topology before choosing a node
+bash mariadb-tpcc-bench.sh --list-numa
+
 # Preview the plan without running anything
 bash mariadb-tpcc-bench.sh --dry-run
 ```
+
+---
+
+## NUMA-aware CPU pinning
+
+On multi-socket systems, cross-NUMA memory accesses add latency that can mask true per-core performance. The `--numa-node` flag eliminates this:
+
+```
+--numa-node 0   →  8-core run  uses cpuset 0-7   (first 8  CPUs of node 0)
+                   16-core run uses cpuset 0-15  (first 16 CPUs of node 0)
+                   32-core run uses cpuset 0-31  (first 32 CPUs of node 0)
+```
+
+Use `--list-numa` to inspect your topology first:
+
+```bash
+bash mariadb-tpcc-bench.sh --list-numa
+```
+
+`numactl` is used when available; the script falls back to sysfs (`/sys/devices/system/node/`) if not installed.
 
 ---
 
@@ -70,10 +102,13 @@ bash mariadb-tpcc-bench.sh --dry-run
 
 For each core count the script:
 1. Generates a tuned `my.cnf` scaled to that core count
-2. Starts a fresh MariaDB container limited to that CPU budget
+2. Starts a fresh MariaDB container limited to that CPU budget (and cpuset if pinning is enabled)
 3. Builds the schema with HammerDB
 4. Runs the timed workload and records results
 5. Tears down the container before the next config
+
+> **Warehouse sizing:** for linear scaling, use `--warehouses` ≥ 10× your highest VU count.  
+> At the default of 64 warehouses, scaling plateaus around 8–16 VUs due to hot-row contention.
 
 ---
 
@@ -86,9 +121,10 @@ mariadb-bench-YYYYMMDD/
 └── results/
     ├── benchmark_report.md   # comparison report
     ├── 8core/
-    │   ├── tpcc_summary.txt  # NOPM, TPM, VUs
+    │   ├── tpcc_summary.txt  # NOPM, TPM, VUs, elapsed
     │   ├── tpcc_run.log
-    │   └── tpcc_result.log
+    │   ├── tpcc_result.log   # per-transaction latency percentiles
+    │   └── tpcc_latency.log
     └── 16core/
         └── ...
 ```
