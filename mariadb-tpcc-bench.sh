@@ -394,7 +394,6 @@ vucreate
 tcstart
 tcstatus
 set jobid [vurun]
-vuwait $jobid
 vudestroy
 tcstop
 puts "TEST COMPLETE"
@@ -475,7 +474,6 @@ puts "TEST STARTED"
 vuset vu $vu
 vucreate
 set jobid [vurun]
-vuwait $jobid
 vudestroy
 puts "TEST COMPLETE"
 set of [open $tmpdir/maria_tproch w]
