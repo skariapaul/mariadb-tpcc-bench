@@ -647,7 +647,7 @@ hdb_result() {
   local label=$1 script=$2 logfile=$3
   log "Extracting $label results ..."
   $DRY_RUN && { log "[dry-run] hammerdbcli auto $script"; return; }
-  rm -f /tmp/hammer.DB
+  # Do NOT remove hammer.DB here — it holds the job results written by hdb_run
   export TMP=/tmp
   cd "$HAMMERDB_DIR"
   ./hammerdbcli auto "$script" 2>&1 | tee "$logfile" || true
@@ -714,6 +714,7 @@ run_config() {
          || grep -oP "\d+(?= NOPM)" "$rdir/tpcc_run.log" 2>/dev/null \
          || echo "see_log")
   tpm=$(grep -oP "\d+(?= MariaDB TPM)" "$rdir/tpcc_result.log" 2>/dev/null \
+        || grep -oP "\d+(?= MariaDB TPM)" "$rdir/tpcc_run.log" 2>/dev/null \
         || echo "see_log")
   {
     echo "NOPM=$nopm"
