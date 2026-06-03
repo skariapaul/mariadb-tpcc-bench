@@ -20,6 +20,9 @@
 #   --workdir PATH       Output directory (default: ./mariadb-bench-YYYYMMDD)
 #   --hammerdb-dir PATH  Existing HammerDB install   (default: auto-download)
 #   --mariadb-ver VER    MariaDB Docker image tag     (default: 10.11)
+#   --cpuset RANGE       Pin container to specific CPUs, e.g. "0-7" or "0,2,4,6"
+#   --numa-node N        Pin to NUMA node N; auto-derives cpuset per core count
+#   --list-numa          Show NUMA topology and exit
 #   --force              Re-run configs that already have results
 #   --yes                Non-interactive; use all defaults / flag values
 #   --dry-run            Print plan without running anything
@@ -57,6 +60,11 @@ MARIADB_VER="10.11"
 FORCE=false
 YES=false
 DRY_RUN=false
+CPUSET=""           # explicit CPU pin range, e.g. "0-7" or "0,2,4,6"
+NUMA_NODE=""        # pin to this NUMA node; auto-derives cpuset per core count
+LIST_NUMA=false     # print NUMA topology and exit
+NUMA_NODES=0        # populated by detect_numa
+NODE_CPULIST=""     # cpulist for selected NUMA node
 
 HAMMERDB_VERSION="4.11"
 HAMMERDB_URL="https://github.com/TPC-C/HammerDB/releases/download/v${HAMMERDB_VERSION}/HammerDB-${HAMMERDB_VERSION}-Linux.tar.gz"
@@ -79,6 +87,9 @@ while [[ $# -gt 0 ]]; do
     --workdir)      WORKDIR="$2";       shift 2 ;;
     --hammerdb-dir) HAMMERDB_DIR="$2";  shift 2 ;;
     --mariadb-ver)  MARIADB_VER="$2";   shift 2 ;;
+    --cpuset)        CPUSET="$2";        shift 2 ;;
+    --numa-node)     NUMA_NODE="$2";    shift 2 ;;
+    --list-numa)     LIST_NUMA=true;    shift   ;;
     --force)        FORCE=true;         shift   ;;
     --yes|-y)       YES=true;           shift   ;;
     --dry-run)      DRY_RUN=true;       shift   ;;
@@ -130,6 +141,100 @@ auto_buffer_pool() {
   local gb=$(( HOST_RAM_GiB * 3 / 4 ))
   [[ $gb -lt 1 ]] && gb=1
   echo "${gb}G"
+}
+
+# ── NUMA awareness ────────────────────────────────────────────────────────────
+detect_numa() {
+  # || true: ls exits non-zero when glob finds nothing; arithmetic safely clamps to ≥1
+  NUMA_NODES=$(ls -d /sys/devices/system/node/node[0-9]* 2>/dev/null | wc -l) || true
+  NUMA_NODES=$(( NUMA_NODES < 1 ? 1 : NUMA_NODES ))
+}
+
+# Returns the cpulist string for NUMA node N, e.g. "0-15,32-47"
+node_cpulist() {
+  local node=$1
+  local f="/sys/devices/system/node/node${node}/cpulist"
+  if [[ -f "$f" ]]; then
+    cat "$f"
+  elif command -v numactl &>/dev/null; then
+    numactl --hardware 2>/dev/null \
+      | awk "/^node ${node} cpus:/{sub(/node [0-9]+ cpus: */,\"\"); gsub(/ /,\",\"); print}"
+  else
+    echo ""
+  fi
+}
+
+# Take the first N CPUs from a cpulist range string and return as compact range.
+# e.g. cpulist_first_n "0-3,8-11" 6  →  "0-3,8-9"
+cpulist_first_n() {
+  local list=$1 n=$2
+  local -a cpus=()
+  local part start end i
+  IFS=',' read -ra parts <<< "$list"
+  for part in "${parts[@]}"; do
+    part="${part// /}"
+    if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      start="${BASH_REMATCH[1]}"; end="${BASH_REMATCH[2]}"
+      for (( i=start; i<=end; i++ )); do
+        cpus+=("$i")
+        [[ ${#cpus[@]} -ge $n ]] && break 2
+      done
+    elif [[ "$part" =~ ^[0-9]+$ ]]; then
+      cpus+=("$part")
+      [[ ${#cpus[@]} -ge $n ]] && break
+    fi
+  done
+
+  # Re-encode as compact range string
+  local result="" range_start prev=-1
+  for cpu in "${cpus[@]}"; do
+    if [[ $prev -eq -1 ]]; then
+      range_start=$cpu; prev=$cpu
+    elif [[ $cpu -eq $(( prev + 1 )) ]]; then
+      prev=$cpu
+    else
+      [[ -n "$result" ]] && result+=","
+      if [[ $range_start -eq $prev ]]; then result+="${range_start}"
+      else result+="${range_start}-${prev}"; fi
+      range_start=$cpu; prev=$cpu
+    fi
+  done
+  if [[ $prev -ne -1 ]]; then
+    [[ -n "$result" ]] && result+=","
+    if [[ $range_start -eq $prev ]]; then result+="${range_start}"
+    else result+="${range_start}-${prev}"; fi
+  fi
+  echo "$result"
+}
+
+# Print NUMA topology (numactl --hardware if available, otherwise sysfs)
+list_numa() {
+  section "NUMA Topology"
+  if command -v numactl &>/dev/null; then
+    numactl --hardware
+  else
+    warn "numactl not found (install: sudo apt install numactl). Reading from sysfs:"
+    for d in /sys/devices/system/node/node[0-9]*/; do
+      [[ -d "$d" ]] || continue
+      local node; node=$(basename "$d")
+      local cpulist mem_mib
+      cpulist=$(cat "$d/cpulist" 2>/dev/null || echo "?")
+      mem_mib=$(awk '/MemTotal/{printf "%d", $2/1024}' "$d/meminfo" 2>/dev/null || echo "?")
+      log "  ${node}: CPUs ${cpulist}  Memory: ${mem_mib} MiB"
+    done
+  fi
+}
+
+# Returns the cpuset to export for a given core count
+resolve_cpuset() {
+  local cores=$1
+  if [[ -n "$CPUSET" ]]; then
+    echo "$CPUSET"
+  elif [[ -n "$NUMA_NODE" && -n "$NODE_CPULIST" ]]; then
+    cpulist_first_n "$NODE_CPULIST" "$cores"
+  else
+    echo ""
+  fi
 }
 
 # ── Dependency checks ─────────────────────────────────────────────────────────
@@ -298,6 +403,11 @@ EOF
 # ── docker-compose generator ──────────────────────────────────────────────────
 generate_compose() {
   local out="$1"
+  # cpuset line is included only when pinning is configured; empty value is invalid in Compose
+  local cpuset_line=""
+  [[ -n "$CPUSET" || -n "$NUMA_NODE" ]] && \
+    cpuset_line='    cpuset: "${BENCH_CPUSET}"'
+
   cat > "$out" <<EOF
 services:
   mariadb:
@@ -311,6 +421,7 @@ services:
       MARIADB_PASSWORD: ${DB_PASS}
     ports:
       - "${DB_PORT}:3306"
+${cpuset_line}
     deploy:
       resources:
         limits:
@@ -557,9 +668,16 @@ run_config() {
     return
   fi
 
+  # Resolve CPU pinning for this core count
+  local cpuset
+  cpuset=$(resolve_cpuset "$cores")
+  export BENCH_CPUSET="$cpuset"
+  local pin_info=""
+  [[ -n "$cpuset" ]] && pin_info="  cpuset=${cpuset}"
+
   mkdir -p "$rdir"
   hr
-  log "STARTING ${cores}-CORE BENCHMARK  (TPC-C VUs=${tpcc_vu}  TPC-H VUs=${tpch_vu})"
+  log "STARTING ${cores}-CORE BENCHMARK  (TPC-C VUs=${tpcc_vu}  TPC-H VUs=${tpch_vu}${pin_info})"
   hr
 
   local cnf="$workdir/configs/${cores}core.cnf"
@@ -827,8 +945,14 @@ main() {
 
   check_deps
   detect_system
+  detect_numa
 
-  log "Host: ${HOST_CORES} logical CPUs, ${HOST_RAM_GiB} GiB RAM"
+  log "Host: ${HOST_CORES} logical CPUs, ${HOST_RAM_GiB} GiB RAM, ${NUMA_NODES} NUMA node(s)"
+
+  if $LIST_NUMA; then
+    list_numa
+    exit 0
+  fi
 
   # ── Interactive configuration ─────────────────────────────────────────────
   echo ""
@@ -895,6 +1019,24 @@ main() {
     fi
   fi
 
+  # NUMA / CPU pinning (prompt only when not already set and multiple nodes exist)
+  if [[ -z "$CPUSET" && -z "$NUMA_NODE" && $NUMA_NODES -gt 1 ]]; then
+    echo ""
+    log "Detected ${NUMA_NODES} NUMA nodes (use --list-numa to inspect topology)."
+    log "Pinning the container to one node eliminates cross-node memory latency."
+    local numa_ans=""
+    prompt numa_ans \
+      "Pin to NUMA node? (0…$((NUMA_NODES-1)), or blank to skip)" ""
+    if [[ -n "$numa_ans" ]]; then
+      NUMA_NODE="$numa_ans"
+    else
+      local cpuset_ans=""
+      prompt cpuset_ans \
+        "Or explicit cpuset? (e.g. 0-15 or 0,2,4,6 — blank to skip)" ""
+      [[ -n "$cpuset_ans" ]] && CPUSET="$cpuset_ans"
+    fi
+  fi
+
   # ── Validate ──────────────────────────────────────────────────────────────
   # Validate core list
   local cores_arr=()
@@ -905,6 +1047,24 @@ main() {
     cores_arr+=("$c")
   done
   [[ ${#cores_arr[@]} -eq 0 ]] && die "No valid core configs specified"
+
+  # Validate explicit cpuset
+  if [[ -n "$CPUSET" ]]; then
+    [[ "$CPUSET" =~ ^[0-9][0-9,\-]*$ ]] \
+      || die "Invalid cpuset '$CPUSET' — expected format like '0-7' or '0,2,4,6'"
+  fi
+
+  # Validate NUMA node and load its cpulist
+  if [[ -n "$NUMA_NODE" ]]; then
+    [[ "$NUMA_NODE" =~ ^[0-9]+$ ]] \
+      || die "Invalid NUMA node '$NUMA_NODE' — must be a non-negative integer"
+    [[ -d "/sys/devices/system/node/node${NUMA_NODE}" ]] \
+      || die "NUMA node ${NUMA_NODE} does not exist (system has ${NUMA_NODES} node(s): 0–$((NUMA_NODES-1)))"
+    NODE_CPULIST=$(node_cpulist "$NUMA_NODE")
+    [[ -z "$NODE_CPULIST" ]] \
+      && die "Could not read CPU list for NUMA node ${NUMA_NODE} — try --cpuset instead"
+    ok "NUMA node ${NUMA_NODE}: CPUs ${NODE_CPULIST}"
+  fi
 
   # ── Summary before running ────────────────────────────────────────────────
   echo ""
@@ -918,6 +1078,13 @@ main() {
     echo -e "  TPC-H           : skipped"
   fi
   echo -e "  Buffer pool     : ${BLD}${BUFFER_POOL}${RST}"
+  if [[ -n "$CPUSET" ]]; then
+    echo -e "  CPU pinning     : cpuset ${BLD}${CPUSET}${RST} (all runs)"
+  elif [[ -n "$NUMA_NODE" ]]; then
+    echo -e "  CPU pinning     : NUMA node ${BLD}${NUMA_NODE}${RST}  (${NODE_CPULIST})"
+  else
+    echo -e "  CPU pinning     : none"
+  fi
   echo -e "  MariaDB port    : ${DB_PORT}"
   echo -e "  MariaDB version : ${MARIADB_VER}"
   echo -e "  Working dir     : ${BLD}${WORKDIR}${RST}"
