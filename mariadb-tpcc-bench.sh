@@ -66,8 +66,8 @@ LIST_NUMA=false     # print NUMA topology and exit
 NUMA_NODES=0        # populated by detect_numa
 NODE_CPULIST=""     # cpulist for selected NUMA node
 
-HAMMERDB_VERSION="4.11"
-HAMMERDB_URL="https://github.com/TPC-C/HammerDB/releases/download/v${HAMMERDB_VERSION}/HammerDB-${HAMMERDB_VERSION}-Linux.tar.gz"
+HAMMERDB_VERSION="5.0"
+HAMMERDB_URL=""   # resolved by resolve_hammerdb_url after OS detection
 DOCKER_COMPOSE=""     # resolved by check_deps
 DB_PASS="tpccpass"
 DB_USER="root"
@@ -255,6 +255,33 @@ check_deps() {
 }
 
 # ── HammerDB setup ────────────────────────────────────────────────────────────
+
+# Detect the OS variant and set HAMMERDB_URL accordingly.
+# HammerDB 5.0+ ships platform-specific tarballs under the TPC-Council org.
+resolve_hammerdb_url() {
+  local variant=""
+  if [[ -f /etc/os-release ]]; then
+    local os_id os_ver
+    os_id=$(  . /etc/os-release && echo "${ID:-}")
+    os_ver=$( . /etc/os-release && echo "${VERSION_ID:-}")
+    case "$os_id" in
+      ubuntu|debian)
+        case "$os_ver" in
+          24*) variant="UBU24" ;;
+          22*) variant="UBU22" ;;
+          *)   variant="UBU22" ;;  # best-effort fallback
+        esac ;;
+      rhel|centos|rocky|almalinux|fedora)
+        [[ "$os_ver" =~ ^9 ]] && variant="RHEL9" || variant="RHEL8" ;;
+      *)
+        variant="UBU22" ;;  # generic Linux fallback
+    esac
+  else
+    variant="UBU22"
+  fi
+  HAMMERDB_URL="https://github.com/TPC-Council/HammerDB/releases/download/v${HAMMERDB_VERSION}/HammerDB-${HAMMERDB_VERSION}-Prod-Lin-${variant}.tar.gz"
+}
+
 setup_hammerdb() {
   if [[ -n "$HAMMERDB_DIR" ]]; then
     [[ -x "$HAMMERDB_DIR/hammerdbcli" ]] \
@@ -273,10 +300,13 @@ setup_hammerdb() {
     fi
   done
 
+  resolve_hammerdb_url
+
   # Download
   local archive="/tmp/hammerdb-${HAMMERDB_VERSION}.tar.gz"
   local dest="$HOME/HammerDB"
   log "HammerDB not found — downloading v${HAMMERDB_VERSION} to $dest ..."
+  log "  URL: $HAMMERDB_URL"
   if command -v curl &>/dev/null; then
     curl -fSL --progress-bar "$HAMMERDB_URL" -o "$archive"
   else

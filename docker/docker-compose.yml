@@ -1,0 +1,24 @@
+services:
+  mariadb:
+    build:
+      context: .
+      args:
+        MARIADB_VER: ${MARIADB_VER:-10.11}
+    container_name: mariadb-bench
+    restart: "no"
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-tpccpass}
+      MARIADB_DATABASE: ${MARIADB_DATABASE:-tpcc}
+      MARIADB_USER: ${MARIADB_USER:-benchuser}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD:-tpccpass}
+    ports:
+      - "${DB_PORT:-3307}:3306"
+    deploy:
+      resources:
+        limits:
+          cpus: "${BENCH_CPUS:-8}"
+    volumes:
+      - mariadb_bench_data:/var/lib/mysql
+
+volumes:
+  mariadb_bench_data:
