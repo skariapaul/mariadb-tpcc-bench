@@ -421,7 +421,7 @@ back_log                      = 1500
 thread_cache_size             = ${tcs}
 thread_stack                  = 192K
 
-join_buffer_size              = 4096M
+join_buffer_size              = 64M
 read_buffer_size              = 48M
 read_rnd_buffer_size          = 64M
 sort_buffer_size              = 64M
