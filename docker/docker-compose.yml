@@ -4,7 +4,7 @@ services:
       context: .
       args:
         MARIADB_VER: ${MARIADB_VER:-10.11}
-    container_name: mariadb-bench
+    container_name: mariadb-bench-standalone
     restart: "no"
     environment:
       MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-tpccpass}
