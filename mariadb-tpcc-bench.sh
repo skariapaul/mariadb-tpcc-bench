@@ -243,6 +243,12 @@ check_deps() {
   docker info &>/dev/null       || die "Docker daemon not accessible. Try: sudo systemctl start docker (or add yourself to the docker group)."
   command -v curl &>/dev/null || command -v wget &>/dev/null \
     || die "Neither curl nor wget found. Install one of them."
+  # HammerDB's MariaDB TCL extension requires libmariadb.so.3 on the host
+  if ! ldconfig -p 2>/dev/null | grep -q libmariadb.so.3; then
+    die "libmariadb.so.3 not found. Install it first:
+  Ubuntu/Debian : sudo apt-get install -y libmariadb3
+  RHEL/CentOS   : sudo yum install -y mariadb-connector-c"
+  fi
   # Prefer Docker Compose v2 plugin; fall back to legacy standalone binary
   if docker compose version &>/dev/null 2>&1; then
     DOCKER_COMPOSE="docker compose"

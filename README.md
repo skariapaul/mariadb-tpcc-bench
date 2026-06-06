@@ -11,7 +11,24 @@ Tests MariaDB performance across multiple CPU core counts with a fully tuned Inn
 - Docker Engine 20.10+ with Compose v2 (`docker compose`) or Compose v1 (`docker-compose`)
 - bash 4+
 - `curl` or `wget`
+- `libmariadb3` — MariaDB client library (required by HammerDB's TCL driver)
+  - Ubuntu/Debian: `sudo apt-get install -y libmariadb3`
+  - RHEL/CentOS: `sudo yum install -y mariadb-connector-c`
 - ~20 GB free disk, ≥ 4 GB RAM
+
+---
+
+## Docker container (standalone)
+
+A ready-to-use MariaDB container with benchmark-optimized defaults is in `docker/`:
+
+```bash
+cd docker
+cp .env.example .env          # adjust BENCH_CPUS, buffer pool, etc.
+docker compose up -d           # or: docker-compose up -d
+```
+
+The `my.cnf` in that directory contains the base InnoDB tuning. Mount a custom override file for per-run adjustments.
 
 ---
 
