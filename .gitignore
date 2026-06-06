@@ -1,2 +1,4 @@
-mariadb-bench-*/
+mariadb-bench-20*/
+mariadb-bench-amd-tuned/
+mariadb-bench-reference/results/
 *.log

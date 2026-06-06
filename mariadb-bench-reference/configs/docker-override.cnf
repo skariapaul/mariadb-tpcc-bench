@@ -1,0 +1,7 @@
+# Docker override — fixes paths that don't apply inside a container.
+# All other settings come from 50-server.cnf (mounted first).
+[mysqld]
+socket  = /var/run/mysqld/mysqld.sock
+
+[mariadb]
+datadir = /var/lib/mysql

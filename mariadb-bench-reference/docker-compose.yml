@@ -1,0 +1,25 @@
+services:
+  mariadb:
+    image: mariadb:10.11
+    container_name: mariadb-bench
+    restart: "no"
+    cap_add: [IPC_LOCK]
+    cpuset: "0-15,64-79"
+    environment:
+      MARIADB_ROOT_PASSWORD: maria
+      MARIADB_DATABASE: tpcc
+      MARIADB_USER: benchuser
+      MARIADB_PASSWORD: maria
+    ports:
+      - "3307:3306"
+    deploy:
+      resources:
+        limits:
+          cpus: "32"
+    volumes:
+      - mariadb_bench_data:/var/lib/mysql
+      - ../MariaDB TPC-C/50-server.cnf:/etc/mysql/mariadb.conf.d/50-server.cnf:ro
+      - ./configs/docker-override.cnf:/etc/mysql/mariadb.conf.d/99-docker.cnf:ro
+
+volumes:
+  mariadb_bench_data:

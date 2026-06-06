@@ -89,6 +89,106 @@ ldconfig -p | grep libmariadb
 
 ---
 
+## EPYC NPS4 Optimized Setup (best results)
+
+This section documents the configuration that achieves peak TPC-C throughput on
+a single-socket AMD EPYC 9005-series processor by combining BIOS-level NUMA
+topology tuning, CCD-aware CPU pinning, and NUMA memory binding.
+
+### 1. Set NPS4 in BIOS
+
+In the BIOS, navigate to **AMD CBS → NBIO → Nodes Per Socket** and set it to **4**.
+Reboot, then verify:
+
+```bash
+numactl --hardware
+# Expected: "available: 4 nodes (0-3)"
+# Node 0 should show CPUs 0-15, 64-79 (two CCDs, 377 GB split evenly across 4 nodes)
+```
+
+With NPS4, each pair of CCDs maps to its own NUMA node, eliminating cross-die
+memory latency for a workload pinned to node 0.
+
+### 2. Start the container (docker run — required for --cpuset-mems)
+
+`docker-compose` does not support `--cpuset-mems`. Use `docker run` directly so
+both CPU and memory are pinned to NUMA node 0:
+
+```bash
+docker rm -f mariadb-bench 2>/dev/null
+docker run -d \
+  --name mariadb-bench \
+  --cpuset-cpus "0-15,64-79" \
+  --cpuset-mems 0 \
+  --cap-add IPC_LOCK \
+  -e MARIADB_ROOT_PASSWORD=maria \
+  -e MARIADB_DATABASE=tpcc \
+  -p 3307:3306 \
+  -v mariadb-bench-reference_mariadb_bench_data:/var/lib/mysql \
+  -v "/path/to/mariadb-tpcc-bench/MariaDB TPC-C/50-server.cnf:/etc/mysql/mariadb.conf.d/50-server.cnf:ro" \
+  -v "/path/to/mariadb-tpcc-bench/mariadb-bench-reference/configs/docker-override.cnf:/etc/mysql/mariadb.conf.d/99-docker.cnf:ro" \
+  mariadb:10.11
+
+# Wait for ready
+until docker exec mariadb-bench mysqladmin -uroot -pmaria status 2>/dev/null; do sleep 2; done
+```
+
+Replace `/path/to/mariadb-tpcc-bench` with the absolute path to this repo.
+
+### 3. Build the schema
+
+**64 warehouses** (fast build, ~5 min):
+```bash
+cd /path/to/HammerDB && TMP=/tmp ./hammerdbcli auto \
+  /path/to/mariadb-tpcc-bench/mariadb-bench-reference/tcl/tpcc_build.tcl
+```
+
+**128 warehouses** (recommended — reduces lock contention with 32 VUs, ~15 min):
+```bash
+cd /path/to/HammerDB && TMP=/tmp ./hammerdbcli auto \
+  /path/to/mariadb-tpcc-bench/mariadb-bench-reference/tcl/tpcc_build_128w.tcl
+```
+
+### 4. Run the benchmark
+
+**16 VUs** (CCD0 only — closest to Viettel PoC spec):
+```bash
+cd /path/to/HammerDB && TMP=/tmp ./hammerdbcli auto \
+  /path/to/mariadb-tpcc-bench/mariadb-bench-reference/tcl/tpcc_run.tcl 2>&1 | tee /tmp/tpcc-run.log
+```
+
+**32 VUs** (full node 0, 2 CCDs — best throughput):
+```bash
+cd /path/to/HammerDB && TMP=/tmp ./hammerdbcli auto \
+  /path/to/mariadb-tpcc-bench/mariadb-bench-reference/tcl/tpcc_run_32vu.tcl 2>&1 | tee /tmp/tpcc-run.log
+```
+
+### 5. Results on EPYC 9555P (64c, NPS4, Ubuntu 24.04)
+
+| Config | VUs | Warehouses | NOPM | TPM |
+|--------|-----|------------|------|-----|
+| NPS1, CCD0 pin, 50-server.cnf (PoC baseline) | 16 | 64 | 327,198 | 759,994 |
+| NPS4, CCD0 pin, --cpuset-mems 0 | 16 | 64 | 331,118 | 769,165 |
+| NPS4, full node 0 (2 CCDs), --cpuset-mems 0 | 32 | 64 | 338,919 | 787,437 |
+
+**+91% over AMD PoC 48-core reference (177,162 NOPM)**
+**+65% over AMD PoC 64-core reference (205,004 NOPM)**
+
+### Why this works
+
+- **NPS4** maps each pair of CCDs to its own NUMA node — memory accesses stay
+  local to the dies serving the pinned CPUs.
+- **`--cpuset-mems 0`** ensures the kernel allocates all MariaDB pages from node 0
+  physical memory, eliminating cross-node DRAM latency entirely.
+- **`--cpuset-cpus "0-15,64-79"`** pins the container to 16 physical cores (both
+  CCDs in node 0) plus their HT siblings — giving 32 logical CPUs with fully local
+  L3 cache and memory.
+- **`50-server.cnf`** disables performance_schema, doubles the InnoDB buffer pool
+  relative to defaults, disables double-write, and sets `innodb_flush_log_at_trx_commit=0`
+  for maximum throughput.
+
+---
+
 ## Standalone Docker container
 
 A pre-configured MariaDB container lives in `docker/`. Use it to connect
