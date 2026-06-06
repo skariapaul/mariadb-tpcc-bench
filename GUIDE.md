@@ -17,29 +17,119 @@ entirely inside Docker. For each CPU core count you choose it:
 
 ## Prerequisites
 
-| Requirement | Version | Install |
-|---|---|---|
-| Docker Engine | 20.10+ | https://docs.docker.com/engine/install/ |
-| Docker Compose | v2 plugin (`docker compose`) or v1 (`docker-compose`) | included with Docker Desktop; `apt install docker-compose-plugin` on Ubuntu |
-| bash | 4+ | pre-installed on every modern Linux |
-| curl **or** wget | any | `apt install curl` |
-| Free disk | ≥ 20 GB | for Docker images, MariaDB data, and HammerDB |
-| Free RAM | ≥ 4 GB | script reserves 75% for the InnoDB buffer pool by default |
+### Docker Engine
 
-> **Docker group**: if you get "permission denied" errors, add yourself and re-login:
+**Ubuntu 22.04 / 24.04**
+```bash
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER && newgrp docker
+```
+
+**RHEL 8 / 9 / Rocky Linux / AlmaLinux**
+```bash
+sudo yum install -y yum-utils
+sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+sudo yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER && newgrp docker
+```
+
+Verify:
+```bash
+docker --version
+docker compose version   # v2 plugin
+# or
+docker-compose --version # v1 fallback
+```
+
+### MariaDB client library
+
+HammerDB's TCL driver loads `libmariadb.so.3` from the host at runtime.
+Install it before running the benchmark.
+
+**Ubuntu / Debian**
+```bash
+sudo apt-get install -y libmariadb3
+```
+
+**RHEL / CentOS / Rocky Linux**
+```bash
+sudo yum install -y mariadb-connector-c
+```
+
+Verify:
+```bash
+ldconfig -p | grep libmariadb
+# Expected: libmariadb.so.3 (libc6,x86-64) => /lib/x86_64-linux-gnu/libmariadb.so.3
+```
+
+### Other dependencies
+
+| Requirement | Minimum | Install |
+|---|---|---|
+| bash | 4+ | pre-installed on every modern Linux |
+| curl **or** wget | any | `apt install curl` / `yum install curl` |
+| Free disk | ≥ 20 GB | Docker images + MariaDB data + HammerDB |
+| Free RAM | ≥ 4 GB | 75% reserved for InnoDB buffer pool by default |
+
+> **Docker group tip:** if you get "permission denied" on Docker commands:
 > ```bash
 > sudo usermod -aG docker $USER && newgrp docker
 > ```
 
 ---
 
+## Standalone Docker container
+
+A pre-configured MariaDB container lives in `docker/`. Use it to connect
+HammerDB manually, run custom workloads, or verify the tuned InnoDB config
+without executing the full benchmark script.
+
+```bash
+cd docker
+cp .env.example .env     # edit BENCH_CPUS, DB_PORT, passwords as needed
+docker compose up -d     # or: docker-compose up -d
+```
+
+The image is built from `docker/Dockerfile` (based on `mariadb:10.11`) and
+bakes in `docker/my.cnf` — a performance-tuned InnoDB configuration with:
+
+- `performance_schema = OFF`
+- `innodb_buffer_pool_size = 12G` (override via env or a second `.cnf` file)
+- `innodb_flush_method = O_DIRECT`
+- `max_connections = 4000`
+- Binary logging disabled
+
+Connect once the container is ready:
+```bash
+mysql -h 127.0.0.1 -P 3308 -uroot -ptpccpass
+```
+
+Stop and remove the container and its data volume:
+```bash
+docker compose down -v
+```
+
+> **Port:** the standalone container defaults to `3308` to avoid conflicts with
+> a benchmark run, which uses `3307` by default. Override with `DB_PORT=XXXX`
+> in `.env`.
+
+---
+
 ## Quick start (all defaults, non-interactive)
 
 ```bash
-# Download the script (or use the copy you already have)
 chmod +x mariadb-tpcc-bench.sh
-
-# Run with all defaults — answers every prompt automatically
 bash mariadb-tpcc-bench.sh --yes
 ```
 
@@ -86,10 +176,6 @@ bash mariadb-tpcc-bench.sh --mariadb-ver 11.4 --buffer-pool 24G --port 3308 --ye
 # Large warehouse count for a serious benchmark
 bash mariadb-tpcc-bench.sh --warehouses 512 --rampup 5 --duration 30 --yes
 
-# TPC-H at scale factor 10 only (no TPC-C)
-# Not directly supported — run with --skip-tpch and comment out TPC-C in the script,
-# or use --duration 1 to minimise TPC-C time.
-
 # Dry run — print the plan without touching anything
 bash mariadb-tpcc-bench.sh --dry-run
 
@@ -106,7 +192,7 @@ bash mariadb-tpcc-bench.sh --hammerdb-dir ~/HammerDB --yes
 
 ```
 mariadb-bench-YYYYMMDD/
-├── docker-compose.yml          ← generated Compose file
+├── docker-compose.yml          ← generated Compose file (per benchmark run)
 ├── configs/
 │   ├── 4core.cnf               ← tuned my.cnf per core count
 │   ├── 8core.cnf
@@ -162,7 +248,7 @@ see artificial contention on the hot rows; use 128 or 256 for cleaner scaling da
 
 ### Buffer pool
 
-The script defaults to 75 % of host RAM. If other processes are running, reduce it:
+The script defaults to 75% of host RAM. If other processes are running, reduce it:
 ```bash
 --buffer-pool 8G
 ```
@@ -188,6 +274,16 @@ sudo usermod -aG docker $USER
 newgrp docker
 ```
 
+### "libmariadb.so.3: cannot open shared object file"
+HammerDB's MariaDB driver is missing its host dependency:
+```bash
+# Ubuntu/Debian
+sudo apt-get install -y libmariadb3
+
+# RHEL/CentOS
+sudo yum install -y mariadb-connector-c
+```
+
 ### "MariaDB did not start within 3 minutes"
 Port 3307 may already be in use. Change it:
 ```bash
@@ -196,11 +292,21 @@ bash mariadb-tpcc-bench.sh --port 3308
 Or check for a stale container: `docker ps -a | grep mariadb-bench`
 
 ### HammerDB download fails
-The script tries GitHub. If the network is restricted, download manually:
+The script auto-detects your OS and downloads the matching HammerDB 5.0 package
+from `github.com/TPC-Council/HammerDB`. If the network is restricted, download
+manually and point the script at your copy:
+
+| OS | URL |
+|---|---|
+| Ubuntu 24.04 | `https://github.com/TPC-Council/HammerDB/releases/download/v5.0/HammerDB-5.0-Prod-Lin-UBU24.tar.gz` |
+| Ubuntu 22.04 | `https://github.com/TPC-Council/HammerDB/releases/download/v5.0/HammerDB-5.0-Prod-Lin-UBU22.tar.gz` |
+| RHEL 9 | `https://github.com/TPC-Council/HammerDB/releases/download/v5.0/HammerDB-5.0-Prod-Lin-RHEL9.tar.gz` |
+| RHEL 8 | `https://github.com/TPC-Council/HammerDB/releases/download/v5.0/HammerDB-5.0-Prod-Lin-RHEL8.tar.gz` |
+
+```bash
+curl -L <URL> | tar -xz --strip-components=1 -C ~/HammerDB
+bash mariadb-tpcc-bench.sh --hammerdb-dir ~/HammerDB --yes
 ```
-https://github.com/TPC-C/HammerDB/releases/download/v4.11/HammerDB-4.11-Linux.tar.gz
-```
-Extract to `~/HammerDB` and pass `--hammerdb-dir ~/HammerDB`.
 
 ### "Results for N-core already exist"
 Use `--force` to overwrite, or delete the specific result directory:

@@ -8,27 +8,63 @@ Tests MariaDB performance across multiple CPU core counts with a fully tuned Inn
 
 ## Requirements
 
-- Docker Engine 20.10+ with Compose v2 (`docker compose`) or Compose v1 (`docker-compose`)
+- Docker Engine 20.10+
+- Docker Compose v2 (`docker compose`) or v1 (`docker-compose`)
 - bash 4+
 - `curl` or `wget`
-- `libmariadb3` — MariaDB client library (required by HammerDB's TCL driver)
-  - Ubuntu/Debian: `sudo apt-get install -y libmariadb3`
-  - RHEL/CentOS: `sudo yum install -y mariadb-connector-c`
+- `libmariadb3` — MariaDB client library required by HammerDB's TCL driver
 - ~20 GB free disk, ≥ 4 GB RAM
 
 ---
 
-## Docker container (standalone)
+## Installation
 
-A ready-to-use MariaDB container with benchmark-optimized defaults is in `docker/`:
+### 1. Docker
 
+**Ubuntu / Debian**
 ```bash
-cd docker
-cp .env.example .env          # adjust BENCH_CPUS, buffer pool, etc.
-docker compose up -d           # or: docker-compose up -d
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+sudo usermod -aG docker $USER && newgrp docker
 ```
 
-The `my.cnf` in that directory contains the base InnoDB tuning. Mount a custom override file for per-run adjustments.
+**RHEL / CentOS / Rocky Linux**
+```bash
+sudo yum install -y yum-utils
+sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+sudo yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER && newgrp docker
+```
+
+### 2. MariaDB client library (`libmariadb3`)
+
+Required on the **host** — HammerDB's MariaDB TCL driver links against it at runtime.
+
+**Ubuntu / Debian**
+```bash
+sudo apt-get install -y libmariadb3
+```
+
+**RHEL / CentOS / Rocky Linux**
+```bash
+sudo yum install -y mariadb-connector-c
+```
+
+### 3. Clone this repo
+
+```bash
+git clone https://github.com/skariapaul/mariadb-tpcc-bench.git
+cd mariadb-tpcc-bench
+```
 
 ---
 
@@ -43,6 +79,36 @@ bash mariadb-tpcc-bench.sh
 ```
 
 Results and a Markdown report are written to `./mariadb-bench-YYYYMMDD/results/`.
+
+---
+
+## Standalone Docker container
+
+A ready-to-use MariaDB container with benchmark-optimized defaults lives in `docker/`.
+Use it to manually connect HammerDB, run custom workloads, or inspect the tuned config
+without running the full benchmark script.
+
+```bash
+cd docker
+cp .env.example .env          # adjust BENCH_CPUS, DB_PORT, passwords, etc.
+docker compose up -d          # or: docker-compose up -d
+```
+
+Connect:
+```bash
+mysql -h 127.0.0.1 -P 3308 -uroot -ptpccpass
+```
+
+Stop and clean up:
+```bash
+docker compose down -v
+```
+
+The `my.cnf` in `docker/` contains the base InnoDB tuning. Mount a custom file into
+`/etc/mysql/mariadb.conf.d/` with a higher sort prefix to override individual settings.
+
+> **Port note:** the standalone container defaults to `3308` so it does not conflict
+> with a benchmark run (which uses `3307` by default).
 
 ---
 
