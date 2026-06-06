@@ -391,7 +391,6 @@ innodb_flush_method           = O_DIRECT
 innodb_open_files             = 4000
 innodb_stats_on_metadata      = 0
 innodb_doublewrite            = 0
-innodb_checksum_algorithm     = none
 innodb_max_dirty_pages_pct    = 90
 innodb_max_dirty_pages_pct_lwm = 10
 innodb_use_native_aio         = 1
@@ -441,11 +440,14 @@ generate_compose() {
   [[ -n "$CPUSET" || -n "$NUMA_NODE" ]] && \
     cpuset_line='    cpuset: "${BENCH_CPUSET}"'
 
-  # Mount hugepages into the container when the host has them configured
-  local hugepages_volume=""
+  # Hugepage support: mount /dev/hugepages and grant IPC_LOCK when host has them
+  local hugepages_volume="" hugepages_cap=""
   local hp_total
   hp_total=$(cat /proc/sys/vm/nr_hugepages 2>/dev/null || echo 0)
-  [[ "$hp_total" -gt 0 ]] && hugepages_volume='      - /dev/hugepages:/dev/hugepages'
+  if [[ "$hp_total" -gt 0 ]]; then
+    hugepages_volume='      - /dev/hugepages:/dev/hugepages'
+    hugepages_cap='    cap_add: [IPC_LOCK]'
+  fi
 
   cat > "$out" <<EOF
 services:
@@ -461,6 +463,7 @@ services:
     ports:
       - "${DB_PORT}:3306"
 ${cpuset_line}
+${hugepages_cap}
     deploy:
       resources:
         limits:
