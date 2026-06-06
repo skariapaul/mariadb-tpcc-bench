@@ -19,6 +19,7 @@ services:
           cpus: "${BENCH_CPUS:-8}"
     volumes:
       - mariadb_bench_data:/var/lib/mysql
+      - /dev/hugepages:/dev/hugepages
 
 volumes:
   mariadb_bench_data:
