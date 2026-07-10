@@ -334,18 +334,12 @@ generate_cnf() {
   local tcs=$(( cores * 3 ))
   [[ $tcs -lt 50 ]] && tcs=50
 
-  # MariaDB 11.x replaced innodb_log_file_size/innodb_log_files_in_group
-  # with innodb_redo_log_capacity. AMD guide recommends 4G log file × 32 files
-  # for 10.x = 128G redo; approximate with innodb_redo_log_capacity = 8G on 11.x.
-  local major_ver
-  major_ver=$(echo "$MARIADB_VER" | cut -d. -f1)
-  local redo_log_lines
-  if [[ "$major_ver" -ge 11 ]]; then
-    redo_log_lines="innodb_redo_log_capacity      = 8G"
-  else
-    redo_log_lines="innodb_log_file_size          = 4G
-innodb_log_files_in_group     = 32"
-  fi
+  # innodb_redo_log_capacity is not recognized by this build's mariadbd
+  # (confirmed via `mariadbd --verbose --help`: "unknown variable"), which
+  # makes the entrypoint's config check fail and the container exit
+  # immediately. innodb_log_file_size is the variable MariaDB actually
+  # accepts for redo log sizing, on 10.x and 11.x alike.
+  local redo_log_lines="innodb_log_file_size          = 8G"
 
   # Normalize to major.minor for the version-specific section header
   local ver_section
@@ -380,7 +374,6 @@ default_storage_engine        = InnoDB
 skip-log-bin
 
 innodb_buffer_pool_size       = ${bp}
-innodb_buffer_pool_instances  = 64
 ${redo_log_lines}
 innodb_log_buffer_size        = 1G
 ${large_pages_line}
@@ -401,7 +394,6 @@ innodb_max_purge_lag          = 0
 innodb_io_capacity            = 4000
 innodb_io_capacity_max        = 20000
 innodb_lru_scan_depth         = 9000
-innodb_change_buffering       = none
 innodb_read_only              = 0
 innodb_undo_log_truncate      = OFF
 innodb_adaptive_flushing      = 1
@@ -412,7 +404,6 @@ innodb_adaptive_hash_index    = 0
 innodb_read_io_threads        = 16
 innodb_write_io_threads       = 16
 innodb_purge_threads          = 4
-innodb_page_cleaners          = 4
 
 max_connections               = 4000
 table_open_cache              = 8000
@@ -654,14 +645,14 @@ container_start() {
   ( cd "$workdir" && $DOCKER_COMPOSE up -d )
   log "Waiting for MariaDB on port ${DB_PORT} ..."
   local waited=0
-  until docker exec "$CONTAINER" mysql -u"$DB_USER" -p"$DB_PASS" \
+  until docker exec "$CONTAINER" mariadb -u"$DB_USER" -p"$DB_PASS" \
         -e "SELECT 1" &>/dev/null 2>&1; do
     printf "."; sleep 3; waited=$(( waited + 3 ))
     [[ $waited -gt 180 ]] && { echo ""; die "MariaDB did not start within 3 minutes"; }
   done
   echo " ready."
   log "Buffer pool / I/O threads:"
-  docker exec "$CONTAINER" mysql -u"$DB_USER" -p"$DB_PASS" -e "
+  docker exec "$CONTAINER" mariadb -u"$DB_USER" -p"$DB_PASS" -e "
     SELECT @@innodb_buffer_pool_size/1024/1024/1024 AS buffer_pool_GB,
            @@innodb_read_io_threads  AS read_io,
            @@innodb_write_io_threads AS write_io,
