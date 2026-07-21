@@ -648,7 +648,12 @@ container_start() {
   until docker exec "$CONTAINER" mariadb -u"$DB_USER" -p"$DB_PASS" \
         -e "SELECT 1" &>/dev/null 2>&1; do
     printf "."; sleep 3; waited=$(( waited + 3 ))
-    [[ $waited -gt 180 ]] && { echo ""; die "MariaDB did not start within 3 minutes"; }
+    if [[ $waited -gt 180 ]]; then
+      echo ""
+      warn "Last container logs:"
+      docker logs "$CONTAINER" --tail 30 2>&1 | sed 's/^/    /' || true
+      die "MariaDB did not start within 3 minutes"
+    fi
   done
   echo " ready."
   log "Buffer pool / I/O threads:"
@@ -1082,6 +1087,13 @@ main() {
     cores_arr+=("$c")
   done
   [[ ${#cores_arr[@]} -eq 0 ]] && die "No valid core configs specified"
+
+  # MariaDB reads a bare number as bytes, so a missing unit (e.g. "16"
+  # instead of "16G") silently creates an InnoDB buffer pool far too small
+  # to start — mariadbd then fails immediately and container_start()'s
+  # readiness poll just times out at 3 minutes with no clue why.
+  [[ "$BUFFER_POOL" =~ ^[0-9]+[KMGTkmgt]$ ]] \
+    || die "Invalid --buffer-pool '$BUFFER_POOL' — must include a unit suffix, e.g. 12G or 8192M."
 
   # Validate explicit cpuset
   if [[ -n "$CPUSET" ]]; then
