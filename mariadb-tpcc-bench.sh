@@ -23,6 +23,10 @@
 #   --cpuset RANGE       Pin container to specific CPUs, e.g. "0-7" or "0,2,4,6"
 #   --numa-node N        Pin to NUMA node N; auto-derives cpuset per core count
 #   --list-numa          Show NUMA topology and exit
+#   --container-name N   Docker container name (default: mariadb-bench) —
+#                        set uniquely per instance to run several in parallel
+#   --tmp-dir PATH       Dir for HammerDB job/result files (default: /tmp) —
+#                        set uniquely per instance to run several in parallel
 #   --force              Re-run configs that already have results
 #   --yes                Non-interactive; use all defaults / flag values
 #   --dry-run            Print plan without running anything
@@ -72,6 +76,8 @@ DOCKER_COMPOSE=""     # resolved by check_deps
 DB_PASS="tpccpass"
 DB_USER="root"
 CONTAINER="mariadb-bench"
+CONTAINER_NAME_OVERRIDE=""  # --container-name; lets multiple instances share a host
+TMP_DIR="/tmp"              # --tmp-dir; HammerDB job/result files, must be unique per concurrent instance
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -90,6 +96,8 @@ while [[ $# -gt 0 ]]; do
     --cpuset)        CPUSET="$2";        shift 2 ;;
     --numa-node)     NUMA_NODE="$2";    shift 2 ;;
     --list-numa)     LIST_NUMA=true;    shift   ;;
+    --container-name) CONTAINER_NAME_OVERRIDE="$2"; shift 2 ;;
+    --tmp-dir)       TMP_DIR="$2";      shift 2 ;;
     --force)        FORCE=true;         shift   ;;
     --yes|-y)       YES=true;           shift   ;;
     --dry-run)      DRY_RUN=true;       shift   ;;
@@ -99,6 +107,8 @@ while [[ $# -gt 0 ]]; do
     *) die "Unknown option: $1 — use --help for usage" ;;
   esac
 done
+
+[[ -n "$CONTAINER_NAME_OVERRIDE" ]] && CONTAINER="$CONTAINER_NAME_OVERRIDE"
 
 # ── Interactive prompt helper ─────────────────────────────────────────────────
 # prompt VAR_NAME "question" "default"
@@ -676,8 +686,9 @@ hdb_run() {
   local label=$1 script=$2 logfile=$3
   log "HammerDB: $label ..."
   $DRY_RUN && { log "[dry-run] hammerdbcli auto $script"; return; }
-  rm -f /tmp/hammer.DB
-  export TMP=/tmp
+  mkdir -p "$TMP_DIR"
+  rm -f "$TMP_DIR/hammer.DB"
+  export TMP="$TMP_DIR"
   cd "$HAMMERDB_DIR"
   ./hammerdbcli auto "$script" 2>&1 | tee "$logfile"
 }
@@ -687,7 +698,8 @@ hdb_result() {
   log "Extracting $label results ..."
   $DRY_RUN && { log "[dry-run] hammerdbcli auto $script"; return; }
   # Do NOT remove hammer.DB here — it holds the job results written by hdb_run
-  export TMP=/tmp
+  mkdir -p "$TMP_DIR"
+  export TMP="$TMP_DIR"
   cd "$HAMMERDB_DIR"
   ./hammerdbcli auto "$script" 2>&1 | tee "$logfile" || true
 }
@@ -746,7 +758,7 @@ run_config() {
   log "=== TPC-C: extracting results ==="
   hdb_result "TPC-C" "$tcl_dir/tpcc_result.tcl" "$rdir/tpcc_result.log"
 
-  [[ -f /tmp/hdbxtprofile.log ]] && cp /tmp/hdbxtprofile.log "$rdir/tpcc_latency.log"
+  [[ -f "$TMP_DIR/hdbxtprofile.log" ]] && cp "$TMP_DIR/hdbxtprofile.log" "$rdir/tpcc_latency.log"
 
   local nopm tpm
   nopm=$(grep -oP "(?<=System achieved )\d+" "$rdir/tpcc_result.log" 2>/dev/null \
